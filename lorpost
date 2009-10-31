@@ -207,6 +207,11 @@ sub post
     my $body = $msg->body;
     $body =~ s/\n(>+)/\n\n$1/gs;
 
+    foreach ($body, $subject, $group, $tags, $linkurl, $linktext,
+             $imgpath) {
+        utf8::decode($_) if defined $_;
+    }
+
     my $resp = $agent->post($lorserver.($comment ? "/add_comment.jsp"
                                                  : "/add.jsp"),
         Content_Type => defined $imgpath ? 'form-data' : undef,

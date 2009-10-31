@@ -227,6 +227,10 @@ sub post
     );
 
     fatal $resp->status_line if $resp->is_error;
+
+    my $html = $resp->content;
+    utf8::decode($html);
+
     fatal "Cannot post to LOR: $1"
-        if $resp->content =~ /<title>(.*?)<\/title>/;
+        if $html =~ /<div class="error">\s*(.*?)\s*<\/div>/s;
 }

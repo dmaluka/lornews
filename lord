@@ -12,6 +12,7 @@ use AnyDBM_File;
 use IPC::Open3;
 use Time::Local 'timegm';
 use Date::Parse;
+use Encode 'decode';
 
 my $version = "0.1";
 
@@ -673,7 +674,7 @@ sub over
             my $fields = $ind{":$num"};
             defined $fields or next;
 
-            utf8::decode($fields);
+            $fields = decode('MIME-Header', $fields);
             print $client "$num\t$fields\r\n";
         }
 

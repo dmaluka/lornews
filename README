@@ -41,6 +41,7 @@ perl modules:
     HTTP::Cookies
     Date::Parse
     File::Path
+    Encode
     Fcntl
     Switch
 

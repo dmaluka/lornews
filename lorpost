@@ -5,6 +5,7 @@ use warnings;
 
 use Email::Simple::FromHandle;
 use Email::Address;
+use Encode 'decode';
 use LWP::UserAgent;
 use HTTP::Cookies;
 
@@ -119,6 +120,8 @@ sub read_subject
 {
     $subject = $msg->header('Subject')
         or fatal "Missing Subject: header";
+
+    $subject = decode('MIME-Header', $subject);
 }
 
 sub read_replyto
@@ -140,6 +143,9 @@ sub read_misc
     $linkurl  = $msg->header('X-Link-URL');
     $linktext = $msg->header('X-Link-Text');
     $imgpath  = $msg->header('X-Image-Path');
+
+    $_ = decode('MIME-Header', $_)
+        foreach ($tags, $linkurl, $linktext, $imgpath);
 }
 
 sub read_groupid

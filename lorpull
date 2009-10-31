@@ -14,6 +14,7 @@ use Email::Simple;
 use Email::Simple::Creator;
 use Email::Simple::FromHandle;
 use Email::Date::Format 'email_date';
+use Encode 'encode';
 use Date::Parse;
 use Time::Local;
 use AnyDBM_File;
@@ -712,9 +713,13 @@ sub save_article
     my ($dir, $thread, $id, $body, $lines, @head) = @_;
 
     for (my $i = 0; $i < @head / 2; ) {
-        defined $head[2 * $i + 1]
-              ? $i++
-              : splice (@head, 2 * $i, 2);
+        if (defined $head[2 * $i + 1]) {
+            $head[2 * $i + 1] = encode('MIME-Header', $head[2 * $i + 1]);
+            $i++;
+        }
+        else {
+            splice @head, 2*$i, 2;
+        }
     }
     my %head = @head;
 
@@ -734,8 +739,6 @@ sub save_article
         "$head{'Message-ID'}\t".($head{References} || "")."\t".
         "X-Stars: ".($head{'X-Stars'} || "")."\t".
         bytes::length($text)."\t$lines";
-
-    utf8::encode($fields);
 
     -d "$dir/$thread" or mkdir "$dir/$thread"
         or fatal_errno "Cannor mkdir $dir/$thread";

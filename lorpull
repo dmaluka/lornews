@@ -732,6 +732,9 @@ sub save_article
     my $msg = Email::Simple->create(
         header => [
                 @head,
+                'MIME-Version'   => "1.0",
+                'Content-Type'   => "text/plain; charset=utf8",
+                'Content-Transfer-Encoding' => "8bit",
                 'Injection-Date' => email_date($time),
                 'Path'           => "linux.org.ru!not-for-mail",
         ],

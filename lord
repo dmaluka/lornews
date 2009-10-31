@@ -491,12 +491,11 @@ L:      foreach my $group (@groups) {
         open FD, $file or fatal_errno "Cannot open $file";
         flock FD, LOCK_EX;
 
+        binmode FD, ':utf8';
         my $msg = Email::Simple::FromHandle->new(\*FD);
 
         my $inhead = 1;
         while (defined (my $line = $msg->getline)) {
-            utf8::decode($line);
-
             $line =~ s/[\r\n]*$//;
             $line =~ s/^\./../;
 

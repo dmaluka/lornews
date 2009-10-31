@@ -613,8 +613,13 @@ L:  while (1) {
                         lorchanged;
                     }
                 }
-                case "/div" { $quotlev-- > 0 or lorchanged; }
-                case "pre"  { $p->get_tag("p") or lorchanged; }
+                case "/div" {
+                    $quotlev-- > 0 or lorchanged;
+                }
+                case "/pre" {
+                    &$newline;
+                    &$newline;
+                }
                 case "span" {
                     $p->get_tag("img") or lorchanged;
 

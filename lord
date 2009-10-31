@@ -126,7 +126,7 @@ sub server
         }
 
         $client->autoflush(1);
-        binmode $client, 'utf8';
+        binmode $client, ':utf8';
 
         my $pid = fork();
         if (!defined $pid) {

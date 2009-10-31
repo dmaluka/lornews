@@ -1,0 +1,116 @@
+lornews is a NNTP gateway for reading and posting to linux.org.ru (LOR),
+a Russian webforum about Unix-like operating systems and open-source
+software.
+
+lornews consist of 3 programs:
+
+1) lord    - small NNTP server, listens 5119 port by default
+2) lorpull - utility that pulls news from LOR and stores them in the
+             local storage accessed by lord
+3) lorpost - utility that reads a Usenet message from stdin and posts it
+             at LOR; used by lord for POST command
+
+
+Installation
+============
+
+Possibly as root:
+
+    ./install.sh
+or
+    ./install.sh $YOUR_BIN_DIR
+
+As normal user:
+
+    ./install_home.sh
+
+
+Requirements
+============
+
+perl 5.8 or later
+perl modules:
+    HTML::TokeParser
+    HTML::Entities
+    Email::Simple
+    Email::Simple::Creator
+    Email::Simple::FromHandle
+    Email::Address
+    Email::Date::Format
+    LWP::UserAgent
+    HTTP::Cookies
+    Date::Parse
+    File::Path
+    Fcntl
+    Switch
+
+
+Documentation
+=============
+
+lord -h
+lorpull -h
+lorpost -h
+
+Newsgroups are listed in ~/.lornews/groups.
+
+
+Reading articles
+================
+
+Run lord in background:
+
+    lord &
+
+or better
+
+    setsid lord
+
+or whatever...
+
+Instruct your favourite newsreader to talk to localhost (or where you
+run lord), port 5119.
+
+Run lorpull (e.g. periodically via cron) with proper options, e.g.:
+
+    lorpull                                # all last 10 days articles
+    lorpull lor.forum.talks -d 100         # last 100 days articles from Talks
+    lorpull '*slack*,*gentoo*' -d 1 -e -1  # last day Slackware and Gentoo
+                                           # related articles; do not expire
+                                           # old articles
+
+
+Posting articles
+================
+
+Anonymous posting is not currently supported, so you need to have a LOR
+account.
+
+Create your user directory:
+
+    mkdir ~/.lornews/users/vasya
+
+Write your password to the password file:
+
+    echo secret > ~/.lornews/users/vasya/passwd
+    chmod 600 ~/.lornews/users/vasya/passwd
+
+Now you can post from your newsreader - topic-start articles as well as
+comments.
+
+Posted messages must have the following standard headers:
+
+    Newsgroups      - exactly 1 newsgroup name from ~/.lornews/groups
+    From            - name in this header is your nick
+    Subject         - message title
+
+Useful headers for topic-start articles:
+
+    Keywords        - tags
+    X-Link-URL      - URL for a news proof-link
+    X-Link-Text     - description of a news proof-link
+    X-Image-Path    - path to a local screenshot file
+
+
+wbr,
+Mitya

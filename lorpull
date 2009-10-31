@@ -1,0 +1,881 @@
+#!/usr/bin/env perl
+
+require 5.8.0;
+
+use strict;
+use warnings;
+
+use encoding 'utf8';
+
+use LWP::UserAgent;
+use HTML::TokeParser;
+use HTML::Entities;
+use Email::Simple;
+use Email::Simple::Creator;
+use Email::Simple::FromHandle;
+use Email::Date::Format 'email_date';
+use Date::Parse;
+use Time::Local;
+use AnyDBM_File;
+use File::Path;
+use Switch;
+use POSIX ':fcntl_h';
+use Fcntl 'LOCK_EX';
+
+my $version = "0.1";
+
+my $pattern = "*";
+my $days    = 10;
+my $expire  = 100;
+my $timeout = 20;
+my $quiet   = 0;
+
+my $usage = <<"END";
+Usage: lorpull [pattern] [options]
+       lorpull -v | -h
+
+Options:
+    -d N    Pull articles not older than N days (default $days)
+                N = 0 => all news
+                N < 0 => no news (expire only)
+    -e N    Expire articles pulled more than N days ago (default $expire)
+                N = 0 => expire all
+                N < 0 => no expire
+    -t N    Connection timeout N seconds (default $timeout)
+                N = 0 => no timeout
+    -q      Do not print messages to stdout
+END
+
+if (@ARGV == 1 && $ARGV[0] eq "-v") {
+    print "lorpull-$version\n";
+    print "(C)opyright 2009 Dmitry Maluka <dmitrymaluka\@gmail.com>\n";
+    exit;
+}
+elsif (@ARGV == 1 && $ARGV[0] eq "-h") {
+    print $usage;
+    exit;
+}
+elsif (@ARGV) {
+    $pattern = shift @ARGV if $ARGV[0] !~ /^-/;
+
+    my $numre = qr/(\d+(\.\d+)?)|((\d+)?\.\d+)/;
+    for (my $i = 0; $i < @ARGV; $i++) {
+        if ($ARGV[$i] eq "-d" && $ARGV[$i+1] =~ /^-?$numre$/) {
+            $days = $ARGV[++$i];
+        }
+        elsif ($ARGV[$i] eq "-e" && $ARGV[$i+1] =~ /^-?$numre$/) {
+            $expire = $ARGV[++$i];
+        }
+        elsif ($ARGV[$i] eq "-t" && $ARGV[$i+1] =~ /^$numre$/) {
+            $timeout = $ARGV[++$i];
+        }
+        elsif ($ARGV[$i] eq "-q") { $quiet = 1; }
+        else {
+            print STDERR $usage;
+            exit 1;
+        }
+    }
+}
+
+sub warning;
+sub fatal;
+sub fatal_errno;
+
+$pattern =~ /^!?[^\x00-\x20!,\\]+(,!?[^\x00-\x20!,\\]+)*$/
+    or fatal "Bad pattern: $pattern";
+
+my $lorserver = "http://www.linux.org.ru";
+my $lorzone   = "Europe/Moscow";
+
+exists $ENV{HOME} or fatal "Environment variable HOME not set";
+my $lordir = "$ENV{HOME}/.lornews";
+
+my $minsec = 60;
+my $daysec = 86400;
+
+$|       = 1 unless $quiet;
+$ENV{TZ} = ":$lorzone";
+
+my @groups;
+
+read_groups();
+
+my $ua = LWP::UserAgent->new(
+    timeout => $timeout,
+    agent   => "lorpull/$version",
+);
+
+work();
+
+sub read_groups
+{
+    open FD, "$lordir/groups"
+        or fatal_errno "Cannot open $lordir/groups";
+
+    my @items;
+    foreach my $item (split /,/, $pattern) {
+        $item =~ s/([\.\+\|\^\$\@\/\(\)\{\}])/\\$1/g;
+        $item =~ s/\*/.*/g;
+        $item =~ s/\?/./g;
+
+        push @items, [ $item, scalar ($item =~ s/^!//) ];
+    }
+
+    while (<FD>) {
+        /^\s*([^\x00-\x20!,*?[\]\\]+)\s+(\d+)\s+/
+            or fatal "Bad line $. in $lordir/groups";
+        my ($group, $id) = ($1, $2);
+
+        foreach my $item (@items) {
+            push (@groups, [ $group, $id ]), last
+                if ($group =~ /^$$item[0]$/ xor $$item[1]);
+        }
+    }
+
+    close FD;
+    @groups or fatal "No newsgroups matching pattern";
+}
+
+sub tie_index(\%$$$);
+sub untie_index(\%);
+sub brokindex;
+sub lorchanged;
+
+# Group index layout:
+#
+#     count
+#     min
+#     max
+#     <num>   => thread/id
+#     +<num>  => timestamp
+#     :<num>  => overview fields
+#     <num>/  => articles count in thread <num>
+
+sub work
+{
+    foreach (@groups) {
+        my ($group, $id) = ($$_[0], $$_[1]);
+        my $dir = $lordir."/news/".join("/", split(/\./, $group));
+
+        unless (-d $dir) {
+            eval { mkpath($dir) };
+            fatal "Cannot create create $dir: $@" if $@;
+
+            my %ind;
+            tie_index %ind, $dir, O_RDWR | O_CREAT, 0;
+
+            $ind{count} = 0;
+            $ind{min} = 1;
+            $ind{max} = 0;
+
+            untie_index %ind;
+        }
+
+        expire($group, $dir)  if $expire >= 0;
+        pull($group, $id, $dir) if $days >= 0;
+    }
+}
+
+sub expire
+{
+    my ($group, $dir) = @_;
+
+    print "Expiring $group... 0 articles deleted\n"
+        unless $quiet;
+
+    my %ind;
+    my ($min, $max) = tie_index %ind, $dir, O_RDWR, 1;
+
+    my $num;
+    my $k = 0;
+    my $w = 1;
+
+    for ($num = $min; $num <= $max; $num++) {
+        defined $ind{$num} or next;
+
+        $ind{$num} =~ /^(\d+)\/(\d+)$/ or brokindex $dir;
+        my ($thr, $art) = ($1, $2);
+
+        if ($expire) {
+            my $stamp = $ind{"+$num"};
+            defined $stamp && $stamp =~ /^\d+$/ or brokindex $dir;
+
+            (time - $stamp) / $daysec > $expire or last;
+        }
+
+        delete $ind{$num};
+        delete $ind{"+$num"};
+        delete $ind{":$num"};
+
+        $ind{count}-- > 0 or brokindex $dir;
+
+        defined $ind{"$thr/"} && $ind{"$thr/"} =~ /^\d+$/
+                              && $ind{"$thr/"}-- > 0
+            or brokindex $dir;
+
+        unlink "$dir/$thr/$art"
+            or $w++, warning "Cannot remove $dir/$thr/$art: $!";
+
+        if (dir_empty("$dir/$thr")) {
+            rmdir "$dir/$thr"
+                or $w++, warning "Cannot rmdir $dir/$thr: $!";
+        }
+
+        $k++;
+    }
+    
+    $ind{min} = $num;
+
+    untie_index %ind;
+
+    print "\e[".$w."A\e[".(14 + length($group))."G$k articles deleted".
+         ("\n" x $w)
+        unless $quiet;
+}
+
+sub pull
+{
+    my ($group, $id, $dir) = @_;
+
+    print "Pulling $group... 0 articles retrieved\n"
+        unless $quiet;
+
+    my $k = 0;
+
+    for (my $offset = 0; ; $offset += 30) {
+        my $time = time;
+        my ($day, $mon, $year) = (localtime $time)[3..5];
+
+        my $p = get_page("$lorserver/group-lastmod.jsp?group=$id&".
+                         "offset=$offset");
+        $p->get_tag("tbody") or lorchanged;
+
+        while (1) {
+            my $t = $p->get_tag("tr", "/tbody") or lorchanged;
+            last if $t->[0] eq "/tbody";
+
+            my $thread;
+            my $pages = 0;
+            my $clipped = 0;
+
+            my $a = $p->get_tag("a", "img") or lorchanged;
+            if ($a->[0] eq "img") {
+                $clipped = 1 if exists $a->[1]{src}
+                                    && $a->[1]{src} eq "/img/paper_clip.gif";
+                $a = $p->get_tag("a") or lorchanged;
+            }
+            exists $a->[1]{href}
+                && $a->[1]{href} =~ /msgid=(\d+)/ or lorchanged;
+            $thread = $1;
+
+            while (1) {
+                defined (my $t = $p->get_tag("/a", "/td")) or lorchanged;
+                $t->[0] eq "/a" or last;
+                $pages++;
+            }
+            $pages > 0 or lorchanged;
+
+            $p->get_tag("td") or lorchanged;
+
+            if ($days && !$clipped) {
+                my $date = $p->get_text;
+                $date =~ s/\p{IsSpace}/ /g;
+
+                my $age =
+                    $date =~ /минуту назад/         ? $minsec
+                  : $date =~ /(\d+)? минут.? назад/ ? $minsec * $1
+                  : $date =~ /сегодня (\d\d):(\d\d)/
+                        ? $time - time_local(0, $2, $1, $day, $mon, $year)
+                  : $date =~ /вчера (\d\d):(\d\d)/
+                        ? $time - time_local(0, $2, $1, $day, $mon, $year) + $daysec
+                  : $time - parse_date($date);
+
+                $age / $daysec <= $days or return;
+            }
+
+            $p->get_tag("td") or lorchanged;
+
+            my $arts = 1;
+            if ($p->get_text !~ /-\/-\/-/) {
+                $p->get_tag("b") or lorchanged;
+                $p->get_text =~ /^(\d+)$/ or lorchanged;
+                $arts = $1 + 1;
+            }
+
+            my $old = read_index($dir, "$thread/");
+            if (defined $old) {
+                $old =~ /^\d+$/ or brokindex;
+                $arts > $old or next;
+            }
+
+            foreach (0 .. $pages-1) {
+                my $pk = pull_thread_page($thread, $_, $group, $dir)
+                    or last;
+                $k += $pk;
+
+                print "\e[A\e[".(13 + length($group))."G".
+                      "$k articles retrieved\n"
+                    unless $quiet;
+            }
+        }
+    }
+}
+
+sub pull_thread_page
+{
+    my ($thread, $page, $group, $dir) = @_;
+    my $p = get_page("$lorserver/view-message.jsp?msgid=$thread&page=$page");
+
+    my $k = 0;
+    my $time = time;
+      
+    unless (-f "$dir/$thread/0") {
+        $p->get_tag("h1") or lorchanged;
+
+        my $subj = $p->get_text;
+        $subj =~ s/^\s+|\s+$//gs;
+
+        $p->get_tag("/h1") or lorchanged;
+
+        my ($body, $lines, $tags, $linkurl, $linktext, $imgurl, $imginfo,
+            $voteurl) = parse_body($p, 1);
+        my ($user, $stars, $udate, $moder, $mdate) = parse_footer($p, 1);
+
+        if (!$days || ($time - $udate) / $daysec <= $days) {
+            save_article($dir, $thread, 0, $body, $lines,
+                'Newsgroups'        => $group,
+                'Subject'           => $subj,
+                'From'              => "$user <$user\@astral.lor>",
+                'Date'              => email_date($udate),
+                'Keywords'          => $tags,
+                'Message-ID'        => "<lor$thread\@linux.org.ru>",
+                'X-Stars'           => $stars,
+                'X-Link-URL'        => $linkurl,
+                'X-Link-Text'       => $linktext,
+                'X-Image-URL'       => $imgurl,
+                'X-Image-Info'      => $imginfo,
+                'X-Vote-URL'        => $voteurl,
+                'X-Moderator'       => $moder,
+                'X-Moderation-Date' => defined $moder ? email_date($mdate)
+                                                      : undef,
+            );
+
+            $k++;
+        }
+    }
+
+    while (my $t = $p->get_tag("div")) {
+        exists $t->[1]{class} && $t->[1]{class} eq "msg" &&
+        exists $t->[1]{id}    && $t->[1]{id} =~ /^comment-(\d+)$/
+            or next;
+        my $comment = $1;
+
+        !-f "$dir/$thread/$comment" or next;
+
+        my $inreplyto;
+
+        $p->get_tag("/a") or lorchanged;
+        $t = $p->get_tag("a", "/div") or lorchanged;
+        if ($t->[0] eq "a") {
+            exists $t->[1]{href} or lorchanged;
+            $t->[1]{href} =~ /comment-(\d+)$/ or lorchanged;
+
+            $inreplyto = $1;
+        }
+
+        $p->get_tag("h2") or lorchanged;
+
+        my $subj = $p->get_text;
+        $subj =~ s/^\s+|\s+$//gs;
+        $subj =~ s/[\s\t]+/ /gs;
+
+        $p->get_tag("/h2") or lorchanged;
+
+        my ($body, $lines) = parse_body($p, 0);
+        my ($user, $stars, $date) = parse_footer($p, 0);
+
+        if (!$days || ($time - $date) / $daysec <= $days) {
+            my $ref;
+            if ($inreplyto) {
+                $ref = "<lor$thread.$inreplyto\@linux.org.ru>";
+
+                my $origref;
+                if (-f "$dir/$thread/$inreplyto" &&
+                    defined ($origref = read_header("$dir/$thread/$inreplyto",
+                                        "References"))) {
+                    $ref = $origref." ".$ref;
+                }
+            }
+            else {
+                $ref = "<lor$thread\@linux.org.ru>";
+            }
+
+            save_article($dir, $thread, $comment, $body, $lines,
+                'Newsgroups'    => $group,
+                'Subject'       => $subj,
+                'From'          => "$user <$user\@astral.lor>",
+                'Date'          => email_date($date),
+                'Message-ID'    => "<lor$thread.$comment\@linux.org.ru>",
+                'References'    => $ref,
+                'X-Stars'       => $stars,
+            );
+
+            $k++;
+        }
+    }
+
+    return $k;
+}
+
+sub parse_body
+{
+    my ($p, $topic) = @_;
+
+    my $body = "";
+    my $line = 0;
+    my $nl = 0;
+    my $listlev = 0;
+    my $quotlev = 0;
+    my $iq;
+
+    my $lines = 0;
+
+    my ($tags, $linkurl, $linktext);
+    my ($imgurl, $imginfo, $voteurl);
+
+    my $newline = sub {
+        $body ne "" or return;
+        $nl < 2     or return;
+
+        $body .= "\n";
+        $body .= ("    " x $listlev)."  " if $listlev;
+        $body .= (">" x $quotlev)." "     if $quotlev;
+        $body .= "$iq " if defined $iq;
+        $line = 0;
+        $nl++;
+        $lines++;
+    };
+
+    my $append = sub {
+        my $text = shift;
+        $text =~ s/^\p{IsSpace}+|\p{IsSpace}+$//gs;
+
+        foreach my $word (split /\p{IsSpace}+/, $text) {
+            if ($line > 0) {
+                if ($line + ($listlev ? 4 * $listlev + 2 : 0)
+                          + ($quotlev ? $quotlev + 1     : 0)
+                          + length($word) >= 72) {
+                    &$newline;
+                }
+                else {
+                    $body .= " " if $body !~ /\s$/;
+                    $line++;
+                }
+            }
+            $body .= $word;
+            $line += length($word);
+            $nl = 0;
+        }
+    };
+
+L:  while (1) {
+        my $t = $p->get_token or lorchanged;
+
+        if ($t->[0] eq "S" || $t->[0] eq "E") {
+            $t->[1] = "/".$t->[1]
+                           if $t->[0] eq "E";
+
+            switch ($t->[1]) {
+                case "br" { &$newline; }
+                case "p"  {
+                    if ($topic && exists $t->[2]{class}
+                                      && $t->[2]{class} eq "tags") {
+                        $p->get_text =~ /^Метки: $/ or lorchanged;
+                        $p->get_tag("span") or lorchanged;
+
+                        $tags = "";
+                        while (1) {
+                            $t = $p->get_tag("a", "/span");
+                            last if $t->[0] eq "/span";
+
+                            $tags .= ", " if length($tags) > 0;
+                            $tags .= $p->get_text;
+                            $p->get_tag("/a") or lorchanged;
+                        }
+
+                        $p->get_tag("/p") or lorchanged;
+                    }
+                    else {
+                        &$newline;
+                        &$newline;
+                    }
+                }
+                case "i" {
+                    unless ($topic) {
+                        $t = $p->get_token or lorchanged;
+
+                        if ($t->[0] eq "T") {
+                            decode_entities($t->[1]);
+                            if ($t->[1] =~ /^\s*(>+)\s*(.*)/s) {
+                                &$newline;
+                                &$newline;
+                                $iq = $1;
+                                &$append("$1 $2");
+                            }
+                            else {
+                                &$append($t->[1]);
+                            }
+                        }
+                        else {
+                            $p->unget_token($t);
+                        }
+                    }
+                }
+                case "/i" {
+                    unless ($topic) {
+                        undef $iq;
+                        &$newline;
+                        &$newline;
+                    }
+                }
+                case "a" {
+                    exists $t->[2]{href} or lorchanged;
+                    my $href = $t->[2]{href};
+
+                    $t = $p->get_token or lorchanged;
+
+                    if ($t->[0] eq "T") {
+                        my $text = $t->[1];
+                        decode_entities($text);
+
+                        if ($href eq $text || ($text =~ /(.*)\.\.\.$/
+                                            && $href =~ /^$1/)) {
+                            &$append($href);
+                        }
+                        else {
+                            &$append("$text ($href)");
+                        }
+
+                        $p->get_tag("/a") or lorchanged;
+                    }
+                    elsif ($topic && $t->[0] eq "S"
+                                  && $t->[1] eq "img"
+                                  && $href =~ /^\/gallery\//) {
+                        $imgurl = $lorserver.$href;
+
+                        $p->get_tag("i") or lorchanged;
+                        $imginfo = $p->get_text;
+
+                        $p->get_tag("/p") or lorchanged;
+                    }
+                    else {
+                        &$append("[ $href ]");
+                        $p->unget_token($t);
+                    }
+                }
+                case ["ul", "ol"]   {
+                    &$newline;
+                    $listlev++;
+                }
+                case ["/ul", "/ol"] {
+                    $listlev-- > 0 or lorchanged;
+                    &$newline;
+                    &$newline;
+                }
+                case "li" {
+                    $listlev > 0 or lorchanged;
+
+                    $body .= "\n".("    " x $listlev);
+                    $body .= $listlev % 2 ? "* " : "- ";
+                    $line = 0;
+                    $nl = 0;
+                    $lines++;
+                }
+                case "div"  {
+                    exists $t->[2]{class} or lorchanged;
+
+                    if ($t->[2]{class} eq "quote") {
+                        $p->get_tag("h3") or lorchanged;
+                        my $name = $p->get_text;
+                        $p->get_tag("p") or lorchanged;
+
+                        &$newline;
+                        &$newline;
+                        &$append("$name:");
+                        &$newline;
+
+                        $quotlev++;
+                        &$newline;
+                    }
+                    elsif ($t->[2]{class} eq "sign") { last L; }
+                    else {
+                        lorchanged;
+                    }
+                }
+                case "/div" { $quotlev-- > 0 or lorchanged; }
+                case "pre"  { $p->get_tag("p") or lorchanged; }
+                case "span" {
+                    $p->get_tag("img") or lorchanged;
+
+                    my $banned = 0;
+                    $t = $p->get_tag($p, "a", "s") or lorchanged;
+
+                    if ($t->[0] eq "s") {
+                        $banned = 1;
+                        $p->get_tag("a") or lorchanged;
+                    }
+
+                    my $user = $p->get_text;
+                    $p->get_tag("/span") or lorchanged;
+
+                    &$append(!$banned ? "-/@\\- $user"
+                                      : "-\\@/- $user");
+                }
+                case "/td" { $body .= "\t"; }
+                case "/tr" { &$newline; }
+                case "img" {
+                    if (exists $t->[2]{alt}) {
+                        &$append($t->[2]{alt});
+                    }
+                }
+            }
+        }
+        elsif ($t->[0] eq "T") {
+            decode_entities($t->[1]);
+            &$append($t->[1]);
+        }
+    }
+
+    if ($topic && $body =~ s/\n>>> (.*?)\s+\((.*?)\)\s*\.?\s*$//s) {
+        if ($1 eq "Проголосовать") {
+            $voteurl = "$lorserver/$2";
+        }
+        else {
+            $linkurl = $2;
+            $linktext = $1 if $1 ne "Подробности";
+        }
+    }
+    else {
+        $lines++ if $body !~ /\n$/;
+    }
+
+    return $body, $lines, $tags, $linkurl, $linktext,
+           $imgurl, $imginfo, $voteurl;
+}
+
+sub parse_footer
+{
+    my ($p, $topic) = @_;
+    my ($user, $stars, $udate, $moder, $mdate);
+
+    $user = $p->get_text;
+    $user =~ s/^\s+|\s*\(?\s*$//gs;
+
+    while (1) {
+        my $t = $p->get_tag("img", "/a") or lorchanged;
+        last if $t->[0] eq "/a";
+
+        exists $t->[1]{alt} or lorchanged;
+
+        $stars = "" unless defined $stars;
+        $stars .= $t->[1]{alt};
+    }
+
+    $udate = parse_date($p->get_text);
+
+    if ($topic) {
+        my $t = $p->get_tag("br", "/div") or lorchanged;
+
+        if ($t->[0] eq "br") {
+            $p->get_tag("i") or lorchanged;
+            $p->get_text =~ /^Проверено: (.*?) \($/ or lorchanged;
+            $moder = $1;
+
+            $p->get_tag("/a") or lorchanged;
+            $mdate = parse_date($p->get_text);
+        }
+    }
+
+    return $user, $stars, $udate, $moder, $mdate;
+}
+
+sub parse_date
+{
+    shift =~ /(\d\d)\.(\d\d)\.(\d{4}) (\d\d?):(\d\d)(?::(\d\d))?/
+        or lorchanged;
+
+    return time_local($6 || 0, $5, $4, $1, $2 - 1, $3 - 1900);
+}
+
+sub save_article
+{
+    my ($dir, $thread, $id, $body, $lines, @head) = @_;
+
+    for (my $i = 0; $i < @head / 2; ) {
+        defined $head[2 * $i + 1]
+              ? $i++
+              : splice (@head, 2 * $i, 2);
+    }
+    my %head = @head;
+
+    my $time = time;
+    my $msg = Email::Simple->create(
+        header => [
+                @head,
+                'Injection-Date' => email_date($time),
+                'Path'           => "linux.org.ru!not-for-mail",
+        ],
+        body   => $body,
+    );
+    my $text = $msg->as_string;
+
+    my $fields =
+        "$head{Subject}\t$head{From}\t$head{Date}\t".
+        "$head{'Message-ID'}\t".($head{References} || "")."\t".
+        "X-Stars: ".($head{'X-Stars'} || "")."\t".
+        bytes::length($text)."\t$lines";
+
+    utf8::encode($fields);
+
+    -d "$dir/$thread" or mkdir "$dir/$thread"
+        or fatal_errno "Cannor mkdir $dir/$thread";
+
+    open FD, "> $dir/$thread/$id"
+        or fatal_errno "Cannot open $dir/$thread/$id";
+    binmode FD, ':utf8';
+    print FD $text;
+    close FD;
+
+    my %ind;
+    my ($min, $max) = tie_index %ind, $dir, O_RDWR, 1;
+
+    my $num = ++$ind{max};
+    $ind{count}++;
+
+    $ind{$num} = "$thread/$id";
+    $ind{"+$num"} = $time;
+    $ind{":$num"} = $fields;
+
+    if (defined $ind{"$thread/"}) {
+        $ind{"$thread/"} =~ /^\d+$/ or brokindex $dir;
+        $ind{"$thread/"}++;
+    }
+    else {
+        $ind{"$thread/"} = 1;
+    }
+
+    untie_index %ind;
+}
+
+sub get_page
+{
+    my $url = shift;
+
+    my $resp = $ua->get($url);
+    $resp->is_success
+        or fatal "Error downloading $url: ".$resp->status_line;
+
+    my $html = $resp->content;
+    utf8::decode($html);
+
+    my $p = HTML::TokeParser->new(\$html);
+    $p->{textify} = { };
+
+    return $p;
+}
+
+sub read_header
+{
+    my ($file, $header) = @_;
+
+    open FD, $file or fatal_errno "Cannot open $file";
+    flock FD, LOCK_EX;
+
+    my $msg = Email::Simple::FromHandle->new(\*FD);
+    my $val = $msg->header($header);
+
+    close FD;
+
+    return $val;
+}
+
+sub read_index
+{
+    my ($dir, $key) = @_;
+    my $val;
+
+    my %ind;
+    tie_index %ind, $dir, O_RDONLY, 1;
+    $val = $ind{$key};
+    untie_index %ind;
+
+    return $val;
+}
+
+sub tie_index(\%$$$)
+{
+    my ($h, $dir, $mode, $check) = @_;
+
+    open LOCK, "> $dir/index.lock",
+        or fatal_errno "Cannot open $dir/index.lock";
+    flock LOCK, LOCK_EX;
+
+    tie %$h, 'AnyDBM_File', "$dir/index", $mode, 0644
+        or fatal_errno "Cannot open index for $dir";
+
+    $SIG{INT} = 'IGNORE';
+
+    if ($check) {
+        my ($count, $min, $max) = ($$h{count}, $$h{min}, $$h{max});
+
+        $count =~ /^(0|[1-9][0-9]*)$/ &&
+        $min   =~ /^(0|[1-9][0-9]*)$/ &&
+        $max   =~ /^(0|[1-9][0-9]*)$/ &&
+                ($count ? $max - $min + 1 >= $count
+                        : $max - $min + 1 == 0)
+                or brokindex $dir;
+
+        return ($min, $max, $count);
+    }
+}
+
+sub untie_index(\%)
+{
+    my $h = shift;
+    untie %$h;
+
+    $SIG{INT} = 'DEFAULT';
+
+    close LOCK;
+}
+
+sub time_local
+{
+    my $time;
+    eval { $time = timelocal(@_); };
+    !$@ or lorchanged;
+
+    return $time;
+}
+
+sub dir_empty
+{
+    my $dir = shift;
+    my $ret = 1;
+
+    opendir DD, $dir or fatal_errno "Cannot open $dir";
+    while (my $f = readdir DD) {
+        $ret = 0, last if $f ne "."
+                       && $f ne "..";
+    }
+    closedir DD;
+
+    return $ret;
+}
+
+sub warning     { print STDERR "lorpull: warning: $_[0]\n"; }
+sub fatal       { print STDERR "lorpull: $_[0]\n"; exit 1;  }
+
+sub fatal_errno { fatal "$_[0]: $!"; }
+sub brokindex   { fatal "Broken index for $_[0] (codeline ".(caller)[2].")"; }
+sub lorchanged  { fatal "LOR changed its layout (codeline ".(caller)[2].")"; }

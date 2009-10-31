@@ -1,0 +1,232 @@
+#!/usr/bin/env perl
+
+use strict;
+use warnings;
+
+use Email::Simple::FromHandle;
+use Email::Address;
+use LWP::UserAgent;
+use HTTP::Cookies;
+
+my $version = "0.1";
+
+my $timeout = 20;
+
+my $usage = <<"END";
+Usage: lorpost [-t <sec>]
+       lorpost -v | -h
+END
+
+if (@ARGV == 1 && $ARGV[0] eq "-v") {
+    print "lorpost-$version\n";
+    print "(C)opyright 2009 Dmitry Maluka <dmitrymaluka\@gmail.com>\n";
+    exit;
+}
+elsif (@ARGV == 1 && $ARGV[0] eq "-h") {
+    print $usage;
+    exit;
+}
+elsif (@ARGV == 2 && $ARGV[0] eq "-t" && $ARGV[1] =~ /\d+/) {
+    $timeout = $ARGV[1];
+}
+elsif (@ARGV != 0) {
+    print STDERR $usage;
+    exit 1;
+}
+
+sub fatal
+{
+    print STDERR "lorpost: $_[0]\n";
+    exit 1;
+}
+
+my $lorserver = "http://www.linux.org.ru";
+
+exists $ENV{HOME} or fatal "Environment variable HOME not set";
+my $lordir = "$ENV{HOME}/.lornews";
+
+my $user;
+my $group;
+my $subject;
+my $topicid;
+my $replyid;
+my $tags;
+my $linkurl;
+my $linktext;
+my $imgpath;
+my $groupid;
+my $userdir;
+my $passwd;
+my $sessionid;
+
+my $comment = 0;
+
+my $msg = Email::Simple::FromHandle->new(\*STDIN);
+
+read_user();
+read_group();
+read_subject();
+read_replyto();
+read_misc();
+
+read_groupid();
+read_passwd();
+
+my $cookies = HTTP::Cookies->new(
+    file => "$userdir/cookies",
+    ignore_discard => 1,
+);
+my $agent = LWP::UserAgent->new(
+    agent      => "lorpost/$version",
+    cookie_jar => $cookies,
+    timeout    => $timeout,
+);
+
+read_cookies();
+read_sessionid();
+
+post();
+
+sub read_user
+{
+    my $from = $msg->header('From')
+        or fatal "Missing From: header";
+    my @from = Email::Address->parse($from)
+        or fatal "Bad From: header";
+    @from == 1
+        or fatal "Multiple From: items not allowed";
+
+    $user = $from[0]->name;
+    $user ne "anonymous"
+        or fatal "Anonymous posting unsupported";
+
+    $userdir = "$lordir/users/$user";
+}
+
+sub read_group
+{
+    my $groups = $msg->header('Newsgroups')
+        or fatal "Missing Newsgroups: header";
+    my @groups = split /\s*,\s*/, $groups;
+    @groups == 1
+        or fatal "Multiple newsgroups not allowed";
+
+    $group = $groups[0];
+}
+
+sub read_subject
+{
+    $subject = $msg->header('Subject')
+        or fatal "Missing Subject: header";
+}
+
+sub read_replyto
+{
+    my $orig = $msg->header('References') or return;
+    my @orig = split /\s+/, $orig
+        or fatal "Bad References: header";
+
+    $orig[-1] =~ /^<lor(\d+)(?:\.(\d+))?\@.*>$/
+        or fatal "Message-ID in References: header has non-LOR format";
+    ($topicid, $replyid) = ($1, $2);
+
+    $comment = 1;
+}
+
+sub read_misc
+{
+    $tags     = $msg->header('Keywords');
+    $linkurl  = $msg->header('X-Link-URL');
+    $linktext = $msg->header('X-Link-Text');
+    $imgpath  = $msg->header('X-Image-Path');
+}
+
+sub read_groupid
+{
+    open FD, "$lordir/groups"
+        or fatal "Cannot open $lordir/groups: $!";
+    while (<FD>) {
+        if (/^\s*$group\s+(\d+)/) {
+            $groupid = $1;
+            last;
+        }
+    }
+    close FD;
+
+    defined $groupid or fatal "Unknown newsgroup";
+}
+
+sub read_passwd
+{
+    open FD, "$userdir/passwd"
+        or fatal "Cannot open $userdir/passwd: $!";
+    $passwd = <FD>;
+    close FD;
+
+    defined $passwd or fatal "Cannot read password";
+    chomp $passwd;
+}
+
+sub read_cookies
+{
+    my $getnew = 2;
+    $cookies->scan(sub {
+        if (defined $_[8] && $_[8] <= time() + $timeout) {  # expired
+            $getnew = 1;
+        }
+        elsif ($getnew == 2) {
+            $getnew = 0;
+        }
+    });
+
+    if ($getnew) {
+        my $resp = $agent->post("$lorserver/login.jsp", [
+            nick   => $user,
+            passwd => $passwd,
+        ]);
+        fatal $resp->status_line if $resp->is_error;
+        fatal "Cannot get cookies from LOR: $1"
+            if $resp->content =~ /<title>(.*?)<\/title>/;
+
+        eval { $cookies->save() };
+        fatal "Cannot save cookies: $!" if $@;
+    }
+}
+
+sub read_sessionid
+{
+    $cookies->scan(sub {
+        $sessionid = $_[2] if defined $_[1] && $_[1] eq "JSESSIONID";
+    });
+
+    defined $sessionid or fatal "Cannot get session-ID from cookies";
+}
+
+sub post
+{
+    my $body = $msg->body;
+    $body =~ s/\n(>+)/\n\n$1/gs;
+
+    my $resp = $agent->post($lorserver.($comment ? "/add_comment.jsp"
+                                                 : "/add.jsp"),
+        Content_Type => defined $imgpath ? 'form-data' : undef,
+        Content => [
+                session  => $sessionid,
+                group    => $comment ? undef : $groupid,
+                topic    => $topicid,
+                replyto  => $replyid,
+                title    => $subject,
+                image    => defined $imgpath ? [$imgpath] : undef,
+                msg      => $body,
+                linktext => $linktext,
+                url      => $linkurl,
+                tags     => $tags,
+                mode     => $comment ? "quot" : "tex",
+                autourl  => 1,
+        ]
+    );
+
+    fatal $resp->status_line if $resp->is_error;
+    fatal "Cannot post to LOR: $1"
+        if $resp->content =~ /<title>(.*?)<\/title>/;
+}

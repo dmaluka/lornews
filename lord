@@ -1,0 +1,837 @@
+#!/usr/bin/env perl
+
+use strict;
+use warnings;
+
+use IO::Socket;
+use POSIX 'WNOHANG', 'O_RDONLY';
+use Errno 'EINTR';
+use Fcntl 'LOCK_EX';
+use Email::Simple::FromHandle;
+use AnyDBM_File;
+use IPC::Open3;
+use Time::Local 'timegm';
+use Date::Parse;
+
+my $version = "0.1";
+
+my $port    = 5119;
+my $postcmd = "lorpost";
+
+my $usage = <<"END";
+Usage: lord [options]
+       lord -v | -h
+
+Options:
+    -p <num>    Port number to listen (default $port)
+    -c <cmd>    Command for posting articles (default '$postcmd')
+END
+
+if (@ARGV == 1 && $ARGV[0] eq "-v") {
+    print "lord-$version\n";
+    print "(C)opyright 2009 Dmitry Maluka <dmitrymaluka\@gmail.com>\n";
+    exit;
+}
+elsif (@ARGV == 1 && $ARGV[0] eq "-h") {
+    print $usage;
+    exit;
+}
+else {
+    if (@ARGV % 2) {
+        die $usage;
+    }
+    for (my $i = 0; $i < @ARGV; $i += 2) {
+        if ($ARGV[$i] eq "-p" && $ARGV[$i+1] =~ /^\d+$/) {
+            $port = $ARGV[$i+1];
+        }
+        elsif ($ARGV[$i] eq "-c") {
+            $postcmd = $ARGV[$i+1];
+        }
+        else {
+            print STDERR $usage;
+            exit 1;
+        }
+    }
+}
+
+sub warning;
+sub fatal;
+sub fatal_errno;
+
+exists $ENV{HOME} or fatal "Environment variable HOME not set";
+my $lordir = "$ENV{HOME}/.lornews";
+
+my @groups;
+my %groups;
+
+my $curgroup;
+my $curnum;
+
+my $cdate;
+
+read_cdate();
+read_groups();
+
+my $server;
+my $client;
+
+server();
+
+sub read_cdate
+{
+    open FD, "$lordir/cdate"
+        or fatal_errno "Cannot open $lordir/cdate";
+    my $date = <FD>;
+    close FD;
+
+    defined $date and $date =~ /(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})/
+        or fatal "Bad date in $lordir/cdate";
+    eval { $cdate = timegm($6, $5, $4, $3, $2 - 1, $1) };
+    defined $cdate
+        or fatal "Bad date in $lordir/cdate";
+}
+
+sub read_groups
+{
+    open FD, "$lordir/groups"
+        or fatal_errno "Cannot open $lordir/groups";
+
+    while (<FD>) {
+        /^\s*([^\x00-\x20!,*?[\]\\]+)\s+\d+\s+(.+)$/
+            or fatal "Bad line $. in $lordir/groups";
+
+        push @groups, $1;
+        $groups{$1} = $2;
+    }
+
+    close FD;
+}
+
+sub server
+{
+    $server = IO::Socket::INET->new(
+        Type        => SOCK_STREAM,
+        Listen      => SOMAXCONN,
+        Reuse       => 1,
+        LocalPort   => $port,
+    ) or fatal_errno "Cannot initialize server";
+
+    $SIG{CHLD} = sub { local $!; do {} while waitpid(-1, WNOHANG) > 0; };
+
+    while (1) {
+        $client = $server->accept();
+        unless (defined $client) {
+            next if $!{EINTR};
+            fatal_errno "Cannot accept client connection";
+        }
+
+        $client->autoflush(1);
+        binmode $client, 'utf8';
+
+        my $pid = fork();
+        if (!defined $pid) {
+            fatal_errno "Cannot fork subserver";
+        }
+        elsif ($pid == 0) {
+            $server->close;
+            $SIG{CHLD} = 'DEFAULT';
+
+            subserver();
+        }
+
+        $client->close;
+    }
+}
+
+sub subserver
+{
+    my %cmdfunc = (
+        HELP         => \&help,
+        CAPABILITIES => \&capab,
+        DATE         => \&date,
+        MODE         => \&mode,
+        QUIT         => \&quit,
+        GROUP        => \&group,
+        LISTGROUP    => \&listgroup,
+        LAST         => \&last_art,
+        NEXT         => \&next_art,
+        ARTICLE      => \&article,
+        HEAD         => \&head,
+        BODY         => \&body,
+        STAT         => \&stat_art,
+        NEWGROUPS    => \&newgroups,
+        NEWNEWS      => \&newnews,
+        LIST         => \&list,
+        OVER         => \&over,
+        XOVER        => \&over,
+        POST         => \&post,
+    );
+
+    print $client "200 lord/$version\r\n";
+
+    while (<$client>) {
+        s/^\s+|\s+$//gs;
+
+        my ($cmd, @args) = split /\s+/ or next;
+        $cmd = uc $cmd;
+
+        if (!exists $cmdfunc{$cmd}) {
+            print $client "500 Unknown command\r\n";
+        }
+        else {
+            &{$cmdfunc{$cmd}}(@args) or print $client "501 Bad syntax\r\n";
+        }
+    }
+
+    $client->close;
+    exit;
+}
+
+sub help
+{
+    @_ == 0 or return 0;
+
+    print $client "100 Command list"
+             ."\r\nHELP"
+             ."\r\nCAPABILITIES [keyword]"
+             ."\r\nDATE"
+             ."\r\nMODE"
+             ."\r\nQUIT"
+             ."\r\nGROUP group"
+             ."\r\nLISTGROUP [group] [range]"
+             ."\r\nLAST"
+             ."\r\nNEXT"
+             ."\r\nARTICLE [number|message-id]"
+             ."\r\nHEAD [number|message-id]"
+             ."\r\nBODY [number|message-id]"
+             ."\r\nSTAT [number|message-id]"
+             ."\r\nNEWGROUPS [yy]yymmdd hhmmss [GMT]"
+             ."\r\nNEWNEWS pattern [yy]yymmdd hhmmss [GMT]"
+             ."\r\nLIST [ACTIVE|NEWSGROUPS [pattern]]"
+             ."\r\n[X]OVER [range]"
+             ."\r\nPOST"
+             ."\r\n.\r\n";
+
+    return 1;
+}
+
+sub capab
+{
+    @_ <= 1 or return 0;
+
+    print $client "101 Capability list"
+             ."\r\nVERSION 2"
+             ."\r\nIMPLEMENTATION lord/$version"
+             ."\r\nREADER"
+             ."\r\nNEWNEWS"
+             ."\r\nLIST ACTIVE NEWSGROUPS OVERVIEW.FMT"
+             ."\r\nOVER"
+             ."\r\nPOST"
+             ."\r\n.\r\n";
+
+    return 1;
+}
+
+sub date
+{
+    @_ == 0 or return 0;
+
+    my @gm = gmtime;
+    printf $client "111 %04d%02d%02d%02d%02d%02d\r\n",
+        $gm[5] + 1900, $gm[4] + 1, $gm[3], $gm[2], $gm[1], $gm[0];
+
+    return 1;
+}
+
+sub mode
+{
+    @_ == 1 && uc(shift) eq "READER" or return 0;
+
+    print $client "200 Posting allowed\r\n";
+    return 1;
+}
+
+sub quit
+{
+    @_ == 0 or return 0;
+
+    $client->close;
+    exit;
+}
+
+sub tie_index(\%$);
+sub untie_index(\%);
+sub brokindex;
+
+# Group index layout:
+#
+#     count
+#     min
+#     max
+#     <num>   => thread/id
+#     +<num>  => timestamp
+#     :<num>  => overview fields
+#     <num>/  => articles count in thread <num>
+
+sub group
+{
+    @_ == 1 or return 0;
+    my $group = shift;
+
+    if (!exists $groups{$group}) {
+        print $client "411 No such newsgroup\r\n";
+    }
+    else {
+        my ($min, $max, $count) = read_info($group);
+        print $client "211 $count $min $max $group\r\n";
+
+        $curgroup = $group;
+        $curnum = $count ? $min : undef;
+    }
+
+    return 1;
+}
+
+sub listgroup
+{
+    @_ <= 1 || (@_ == 2 && $_[1] =~ /^(\d+)(-(\d+)?)?$/) or return 0;
+    my $group = shift;
+    my $from  = @_ ? $1 : 1;
+    my $to    = @_ ? defined $2 ? $3 : $1 : undef;
+
+    unless (defined $group) {
+        unless (defined $curgroup) {
+            print $client "412 No newsgroup selected\r\n";
+            return 1;
+        }
+        $group = $curgroup;
+    }
+
+    if (!exists $groups{$group}) {
+        print $client "411 No such newsgroup\r\n";
+    }
+    else {
+        my $dir = group_dir($group);
+
+        if (-d $dir) {
+            my %ind;
+            my ($min, $max, $count) = tie_index %ind, $dir;
+
+            print $client "211 $count $min $max $group\r\n";
+
+            $curgroup = $group;
+            $curnum = $count ? $min : undef;
+            
+            $from = $min if $from < $min;
+            $to   = $max if !defined ($to) || $to > $max;
+
+            foreach my $num ($from .. $to) {
+                defined $ind{$num} and print $client "$num\r\n";
+            }
+
+            untie_index %ind;
+        }
+        else {
+            print $client "211 0 1 0 $group\r\n";
+
+            $curgroup = $group;
+            $curnum = undef;
+        }
+
+        print $client ".\r\n";
+    }
+
+    return 1;
+}
+
+sub last_art { @_ == 0 and iterate_art(0); }
+sub next_art { @_ == 0 and iterate_art(1); }
+
+sub iterate_art
+{
+    my $forw = shift;
+
+    if (!defined $curgroup) {
+        print $client "412 No newsgroup selected\r\n";
+    }
+    elsif (!defined $curnum) {
+        print $client "420 Current article number is invalid\r\n";
+    }
+    else {
+        my $dir = group_dir($curgroup);
+
+        if (-d $dir) {
+            my %ind;
+            my ($min, $max) = tie_index %ind, $dir;
+
+            my $num = $curnum;
+            while ($forw ? ++$num <= $max : --$num >= $min) {
+                if (defined (my $val = $ind{$num})) {
+                    print $client "223 $num ".msgid($val)."\r\n";
+                    $curnum = $num;
+
+                    untie_index %ind;
+                    return 1;
+                }
+            }
+
+            untie_index %ind;
+        }
+
+        print $client $forw ? "421 No next article\r\n"
+                            : "422 No previous article\r\n";
+    }
+
+    return 1;
+}
+
+sub article  { @_ <= 1 and show_art(shift, 1, 1, 220); }
+sub head     { @_ <= 1 and show_art(shift, 1, 0, 221); }
+sub body     { @_ <= 1 and show_art(shift, 0, 1, 222); }
+sub stat_art { @_ <= 1 and show_art(shift, 0, 0, 223); }
+
+sub show_art
+{
+    my ($arg, $head, $body, $status) = @_;
+    my ($num, $id, $file);
+
+    my %ind;
+
+    if (!defined $arg || $arg =~ /^(\d+)$/) {
+        $num = $1;
+
+        unless (defined $curgroup) {
+            print $client "412 No newsgroup selected\r\n";
+            return 1;
+        }
+
+        my $dir = group_dir($curgroup);
+        if (-d $dir) {
+            tie_index %ind, $dir;
+            my $val;
+
+            if (defined $num) {
+                unless (defined ($val = $ind{$num})) {
+                    print $client "423 No article with that number\r\n";
+
+                    untie_index %ind;
+                    return 1;
+                }
+            }
+            else {
+                if (defined $curnum && !defined ($val = $ind{$curnum})) {
+                    undef $curnum;
+                }
+
+                $num = $curnum;
+                unless (defined $num) {
+                    print $client "420 Current article number is invalid\r\n";
+
+                    untie_index %ind;
+                    return 1;
+                }
+            }
+
+            untie_index %ind;
+
+            $id = msgid($val);
+            $file = "$dir/$val";
+        }
+        else {
+            print $client
+                (defined $num ? "423 No article with that number\r\n"
+                              : "420 Current article number is invalid\r\n");
+            return 1;
+        }
+    }
+    elsif ($arg =~ /^<.*>$/) {
+        if ($arg !~ /^<lor(\d+)(?:\.(\d+))?\@linux\.org\.ru>$/) {
+            print $client "430 Message-id has non-LOR format\r\n";
+            return 1;
+        }
+        my $thr = $1;
+        my $art = $2 || 0;
+
+        $id = $arg;
+
+L:      foreach my $group (@groups) {
+            my $dir = group_dir($group);
+            -d $dir or next;
+
+            my ($min, $max) = tie_index %ind, $dir;
+
+            foreach my $n ($min .. $max) {
+                my $val = $ind{$n};
+
+                if (defined $val && $val eq "$thr/$art") {
+                    $num = defined $curgroup && $group eq $curgroup
+                                 ? $n : 0;
+                    $file = "$dir/$thr/$art";
+
+                    untie_index %ind;
+                    last L;
+                }
+            }
+
+            untie_index %ind;
+        }
+
+        unless (defined $num) {
+            print $client "430 No article with that message-id\r\n";
+            return 1;
+        }
+    }
+    else {
+        return 0;
+    }
+
+    print $client "$status $num $id\r\n";
+
+    if ($head || $body) {
+        open FD, $file or fatal_errno "Cannot open $file";
+        flock FD, LOCK_EX;
+
+        my $msg = Email::Simple::FromHandle->new(\*FD);
+
+        my $inhead = 1;
+        while (defined (my $line = $msg->getline)) {
+            utf8::decode($line);
+
+            $line =~ s/[\r\n]*$//;
+            $line =~ s/^\./../;
+
+            if ($inhead && $line eq "") {
+                last unless $body;
+
+                print $client "\r\n" if $head;
+                $inhead = 0;
+            }
+            elsif ($inhead && $head || !$inhead && $body) {
+                print $client "$line\r\n";
+            }
+        }
+        print $client ".\r\n";
+
+        close FD;
+    }
+
+    return 1;
+}
+
+sub newgroups
+{
+    @_ == 2 || (@_ == 3 && pop eq "GMT") or return 0;
+
+    my $date = parse_date(@_);
+    defined $date or return 0;
+
+    print $client "231 New newsgroups\r\n";
+
+    if ($cdate >= $date) {
+        foreach my $group (@groups) {
+            my ($min, $max, $count) = read_info($group);
+            print $client "$group $max $min y\r\n";
+        }
+    }
+    print $client ".\r\n";
+
+    return 1;
+}
+
+sub newnews
+{
+    @_ == 3 || (@_ == 4 && pop eq "GMT") or return 0;
+
+    my ($ret, @match) = pattern_match(shift);
+    $ret or return 0;
+
+    my $date  = parse_date(@_);
+    defined $date or return 0;
+
+    print $client "230 New articles list\r\n";
+
+    foreach my $group (@match) {
+        my $dir = group_dir($group);
+        -d $dir or next;
+
+        my %ind;
+        my ($min, $max) = tie_index %ind, $dir;
+
+        foreach my $num ($min .. $max) {
+            my $art = $ind{$num};
+            defined $art or next;
+
+            my $stamp = $ind{"+$num"};
+            defined $stamp && $stamp =~ /^\d+$/ or brokindex $dir;
+
+            if ($stamp >= $date) {
+                print $client msgid($art)."\r\n";
+            }
+        }
+
+        untie_index %ind;
+    }
+    print $client ".\r\n";
+
+    return 1;
+}
+
+sub list
+{
+    @_ <= 2 or return 0;
+
+    my $keyw = @_ ? uc(shift) : "ACTIVE";
+    $keyw eq "ACTIVE"     ||
+    $keyw eq "NEWSGROUPS" ||
+    $keyw eq "OVERVIEW.FMT"
+        or return 0;
+
+    if ($keyw eq "OVERVIEW.FMT") {
+        print $client "215 Overview fields"
+                 ."\r\nSubject:"
+                 ."\r\nFrom:"
+                 ."\r\nDate:"
+                 ."\r\nMessage-ID:"
+                 ."\r\nReferences:"
+                 ."\r\nBytes:"          # respect old clients
+                 ."\r\nLines:"          # respect old clients
+                 ."\r\nX-Stars:full"
+                 ."\r\n.\r\n";
+    }
+    else {
+        my $pattern = shift @_;
+        my @match;
+
+        if (defined $pattern) {
+            my $ret;
+            ($ret, @match) = pattern_match($pattern);
+            $ret or return 0;
+        }
+        else {
+            @match = @groups;
+        }
+
+        print $client "215 Newsgroup list\r\n";
+
+        foreach my $group (@match) {
+            if ($keyw eq "ACTIVE") {
+                my ($min, $max, $count) = read_info($group);
+                print $client "$group $max $min y\r\n";
+            }
+            else {
+                print $client "$group $groups{$group}\r\n";
+            }
+        }
+        print $client ".\r\n";
+    }
+
+    return 1;
+}
+
+sub over
+{
+    @_ <= 1 or return 0;
+    my ($from, $to);
+
+    if (@_) {
+        if ($_[0] =~ /^(\d+)(-(\d+)?)?$/) {
+            $from = $1;
+            $to = defined $2 ? $3 : $1;
+        }
+        elsif ($_[0] =~ /^<.*>$/) {
+            print $client "503 Overview by message-id unsupported\r\n";
+            return 1;
+        }
+        else {
+            return 0;
+        }
+    }
+
+    unless (defined $curgroup) {
+        print $client "412 No newsgroup selected\r\n";
+        return 1;
+    }
+
+    unless (defined $from) {
+        unless (defined $curnum) {
+            print $client "420 Current article number is invalid\r\n";
+            return 1;
+        }
+        $from = $to = $curnum;
+    }
+
+    print $client "224 Overview information\r\n";
+
+    my $dir = group_dir($curgroup);
+    if (-d $dir) {
+        my %ind;
+        my ($min, $max) = tie_index %ind, $dir;
+
+        $from = $min if $from < $min;
+        $to   = $max if !defined ($to) || $to > $max;
+
+        foreach my $num ($from .. $to) {
+            my $fields = $ind{":$num"};
+            defined $fields or next;
+
+            utf8::decode($fields);
+            print $client "$num\t$fields\r\n";
+        }
+
+        untie_index %ind;
+    }
+
+    print $client ".\r\n";
+
+    return 1;
+}
+
+sub post
+{
+    @_ == 0 or return 0;
+
+    print $client "340 Send article\r\n";
+
+    my @lines;
+    while (1) {
+        my $line = <$client>;
+        defined $line or quit();
+        last if $line eq ".\r\n";
+
+        $line =~ s/^\.\././;
+        $line =~ s/\r\n$/\n/;
+        push @lines, $line;
+    }
+
+    local $SIG{PIPE} = 'IGNORE';
+
+    my $pid = open3(\*IN, 0, \*ERR, $postcmd);
+    binmode IN, ':utf8';
+
+    print IN $_ foreach @lines;
+    close IN;
+
+    my $err;
+    while (<ERR>) {
+        $err = $_;
+        chomp $err;
+    }
+
+    waitpid $pid, 0;
+
+    print $client ($? ? "441 ".($err || "Something failed")."\r\n"
+                      : "240 Article posted at LOR\r\n");
+
+    return 1;
+}
+
+sub parse_date
+{
+    my ($date, $time) = @_;
+
+    $date =~ /^((?:\d\d)?\d\d)(\d\d)(\d\d)$/ or return;
+    my ($year, $mon, $day) = ($1, $2 - 1, $3);
+
+    $time =~ /^(\d\d)(\d\d)(\d\d)$/ or return;
+    my ($hour, $min, $sec) = ($1, $2, $3);
+
+    my $gmt;
+    eval { $gmt = timegm($sec, $min, $hour, $day, $mon, $year) };
+
+    return $gmt;
+}
+
+sub pattern_match
+{
+    my $pattern = shift;
+    my @match;
+
+    $pattern =~ /^!?[^\x00-\x20!,\\]+(,!?[^\x00-\x20!,\\]+)*$/
+        or return 0;
+
+    my @items;
+    foreach my $item (split /,/, $pattern) {
+        $item =~ s/([\.\+\|\^\$\@\/\(\)\{\}])/\\$1/g;
+        $item =~ s/\*/.*/g;
+        $item =~ s/\?/./g;
+
+        push @items, [ $item, scalar ($item =~ s/^!//) ];
+    }
+
+    foreach my $group (@groups) {
+        foreach my $item (@items) {
+            push (@match, $group), last
+                if ($group =~ /^$$item[0]$/ xor $$item[1]);
+        }
+    }
+
+    return (1, @match);
+}
+
+sub read_info
+{
+    my $group = shift;
+
+    my $dir = group_dir($group);
+    -d $dir or return (0, 1, 0);
+
+    my %ind;
+    my ($min, $max, $count) = tie_index %ind, $dir;
+    untie_index %ind;
+
+    return ($min, $max, $count);
+}
+
+sub tie_index(\%$)
+{
+    my ($h, $dir) = @_;
+
+    open LOCK, "> $dir/index.lock",
+        or fatal_errno "Cannot open $dir/index.lock";
+    flock LOCK, LOCK_EX;
+
+    $SIG{INT} = 'IGNORE';
+
+    tie %$h, 'AnyDBM_File', "$dir/index", O_RDONLY, 0644
+        or fatal_errno "Cannot open index for $dir";
+
+    my ($count, $min, $max) = ($$h{count}, $$h{min}, $$h{max});
+
+    $count =~ /^(0|[1-9][0-9]*)$/ &&
+    $min   =~ /^(0|[1-9][0-9]*)$/ &&
+    $max   =~ /^(0|[1-9][0-9]*)$/ &&
+            ($count ? $max - $min + 1 >= $count
+                    : $max - $min + 1 == 0)
+            or brokindex $dir;
+
+    return ($min, $max, $count);
+}
+
+sub untie_index(\%)
+{
+    my $h = shift;
+    untie %$h;
+
+    $SIG{INT} = 'DEFAULT';
+
+    close LOCK;
+}
+
+sub msgid
+{
+    my $str = shift;
+    $str =~ /^(\d+)\/(\d+)$/ or brokindex "'$str'";
+
+    "<lor$1".($2 ? ".$2" : "")."\@linux.org.ru>";
+}
+
+sub group_dir
+{
+    $lordir."/news/".join("/", split(/\./, shift));
+}
+
+sub warning     { print STDERR "lord: warning: $_[0]\n"; }
+sub fatal       { print STDERR "lord: $_[0]\n"; exit 1;  }
+
+sub fatal_errno { fatal "$_[0]: $!"; }
+sub brokindex   { fatal "Broken index for $_[0] (codeline ".(caller)[2].")"; }

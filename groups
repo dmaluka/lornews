@@ -1,0 +1,44 @@
+lor.news.lor            2       Новости и объявления о работе сервера WWW.LINUX.ORG.RU
+lor.news.doc            3       Новости о документации
+lor.news.general        4       Новости о Linux, не подходящие в другие группы
+lor.news.oss            6       Новости о свободном ПО, не подходящие в другие группы
+lor.news.mozilla        7       Новости о Mozilla
+lor.news.redhat         13      Новости о RedHat
+lor.news.java           26      Новости о Java
+lor.news.gnome          37      Новости о GNOME
+lor.news.kde            44      Новости о KDE
+lor.news.gnu            196     Новости о GNU/FSF и программах, официально выпускаемых GNU/FSF
+lor.news.security       213     Новости о безопасности Linux/Unix систем и прикладного ПО
+lor.news.russia         2121    Новости о Linux в России
+lor.news.proprietary    4228    Новости о коммерческом ПО
+lor.news.kernel         6204    Новости о ядре Linux
+lor.news.hardware       6205    Новости о железе и драйверах
+lor.news.bsd            9406    Новости о BSD-системах
+lor.news.debian         10794   Новости о Debian
+lor.news.ooo            10980   Новости об OpenOffice (StarOffice)
+lor.news.pda            19103   Новости о PDA
+lor.news.games          19104   Новости об играх
+lor.news.sco            19105   Новости об SCO
+lor.news.cluster        19106   Новости о кластерах
+lor.news.ubuntu         19107   Новости об Ubuntu
+lor.news.slackware      19108   Новости о Slackware
+lor.news.apple          19110   Новости об Apple
+lor.news.novell         19391   Новости о Novell
+lor.news.calculate      19394   Новости о Calculate Linux
+lor.news.gentoo         19395   Новости о Gentoo
+lor.forum.general       126     Общий форум для вопросов, не подходящих в другие группы
+lor.forum.desktop       1339    Вопросы применения Linux/Unix на рабочем столе
+lor.forum.admin         1340    Администрирование Linux/Unix систем и сетей
+lor.forum.install       1342    Установка Linux
+lor.forum.dev           4066    Программирование и разработка ПО под Linux/Unix
+lor.forum.lor           4068    Комментарии по работе и предложения по развитию сервера www.linux.org.ru
+lor.forum.security      7300    Безопасность
+lor.forum.hardware      8403    Железо и Linux
+lor.forum.talks         8404    Нетехнические разговоры о Linux/Unix
+lor.forum.job           9326    Поиск и предложения работы, связанной с Linux/Unix
+lor.forum.games         10161   Игры под Linux/Unix
+lor.forum.webdev        19109   Веб-разработка
+lor.forum.lor-source    19392   Разработка движка сайта
+lor.gallery.screenshots 4962    Скриншоты
+lor.gallery.workplaces  19393   Рабочие места
+lor.vote                19387   Голосования

@@ -217,9 +217,10 @@ sub expire
         unlink "$dir/$thr/$art"
             or $w++, warning "Cannot remove $dir/$thr/$art: $!";
 
-        if (dir_empty("$dir/$thr")) {
+        if ($ind{"$thr/"} == 0) {
             rmdir "$dir/$thr"
                 or $w++, warning "Cannot rmdir $dir/$thr: $!";
+            delete $ind{"$thr/"};
         }
 
         $k++;
@@ -871,21 +872,6 @@ sub time_local
     !$@ or lorchanged;
 
     return $time;
-}
-
-sub dir_empty
-{
-    my $dir = shift;
-    my $ret = 1;
-
-    opendir DD, $dir or fatal_errno "Cannot open $dir";
-    while (my $f = readdir DD) {
-        $ret = 0, last if $f ne "."
-                       && $f ne "..";
-    }
-    closedir DD;
-
-    return $ret;
 }
 
 sub warning     { print STDERR "lorpull: warning: $_[0]\n"; }

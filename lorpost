@@ -62,7 +62,9 @@ my $sessionid;
 
 my $comment = 0;
 
-binmode STDIN, ':utf8';
+binmode STDIN,  ':utf8';
+binmode STDERR, ':utf8';
+
 my $msg = Email::Simple::FromHandle->new(\*STDIN);
 
 read_user();

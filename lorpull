@@ -515,11 +515,15 @@ L:  while (1) {
                     unless ($topic) {
                         $t = $p->get_token or lorchanged;
 
+                        my $br;
+                        if ($t->[0] eq "S" && $t->[1] eq "br") {
+                            $br = $t;
+                            $t = $p->get_token or lorchanged;
+                        }
+
                         if ($t->[0] eq "T") {
                             decode_entities($t->[1]);
                             if ($t->[1] =~ /^\s*(>+)\s*(.*)/s) {
-                                &$newline;
-                                &$newline;
                                 $iq = $1;
                                 &$append("$1 $2");
                             }
@@ -529,13 +533,13 @@ L:  while (1) {
                         }
                         else {
                             $p->unget_token($t);
+                            $p->unget_token($br) if defined $br;
                         }
                     }
                 }
                 case "/i" {
                     unless ($topic) {
                         undef $iq;
-                        &$newline;
                         &$newline;
                     }
                 }

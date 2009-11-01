@@ -213,9 +213,6 @@ sub read_sessionid
 
 sub post
 {
-    my $body = $msg->body;
-    $body =~ s/\n(>+)/\n\n$1/gs;
-
     my $resp = $agent->post($lorserver.($comment ? "/add_comment.jsp"
                                                  : "/add.jsp"),
         Content_Type => defined $imgpath ? 'form-data' : undef,
@@ -226,11 +223,11 @@ sub post
                 replyto  => $replyid,
                 title    => $subject,
                 image    => defined $imgpath ? [$imgpath] : undef,
-                msg      => $body,
+                msg      => $msg->body,
                 linktext => $linktext,
                 url      => $linkurl,
                 tags     => $tags,
-                mode     => $comment ? "quot" : "tex",
+                mode     => $comment ? "ntobrq" : "tex",
                 autourl  => 1,
         ]
     );

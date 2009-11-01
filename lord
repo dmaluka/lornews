@@ -706,7 +706,9 @@ sub post
     local $SIG{PIPE} = 'IGNORE';
 
     my $pid = open3(\*IN, 0, \*ERR, $postcmd);
-    binmode IN, ':utf8';
+
+    binmode IN,  ':utf8';
+    binmode ERR, ':utf8';
 
     print IN $_ foreach @lines;
     close IN;

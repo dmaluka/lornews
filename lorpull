@@ -789,7 +789,7 @@ sub get_page
 
     my $resp = $ua->get($url);
     $resp->is_success
-        or fatal "Error downloading $url: ".$resp->status_line;
+        or fatal $resp->status_line;
 
     my $html = $resp->content;
     utf8::decode($html);

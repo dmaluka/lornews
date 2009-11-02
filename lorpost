@@ -194,8 +194,7 @@ sub read_cookies
             passwd => $passwd,
         ]);
         fatal $resp->status_line if $resp->is_error;
-        fatal "Cannot get cookies from LOR: $1"
-            if $resp->content =~ /<title>(.*?)<\/title>/;
+        fatal $1 if $resp->content =~ /<title>(.*?)<\/title>/;
 
         eval { $cookies->save() };
         fatal "Cannot save cookies: $!" if $@;
@@ -237,6 +236,5 @@ sub post
     my $html = $resp->content;
     utf8::decode($html);
 
-    fatal "Cannot post to LOR: $1"
-        if $html =~ /<div class="error">\s*(.*?)\s*<\/div>/s;
+    fatal $1 if $html =~ /<div class="error">\s*(.*?)\s*<\/div>/s;
 }

@@ -724,11 +724,12 @@ sub save_article
 
     for (my $i = 0; $i < @head / 2; ) {
         if (defined $head[2 * $i + 1]) {
-            $head[2 * $i + 1] = encode('MIME-Header', $head[2 * $i + 1]);
+            $head[2 * $i + 1] = join("", split(/\s*\n\s*/,
+                    encode('MIME-Header', $head[2 * $i + 1])));
             $i++;
         }
         else {
-            splice @head, 2*$i, 2;
+            splice @head, 2 * $i, 2;
         }
     }
     my %head = @head;

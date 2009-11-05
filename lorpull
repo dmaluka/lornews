@@ -554,8 +554,8 @@ L:  while (1) {
                         my $text = $t->[1];
                         decode_entities($text);
 
-                        if ($href eq $text || ($text =~ /(.*)\.\.\.$/
-                                            && $href =~ /^$1/)) {
+                        if ($href eq $text || ($text =~ /(.*?)\.\.\.$/
+                                && substr($href, 0, length($1)) eq $1)) {
                             &$append($href);
                         }
                         else {

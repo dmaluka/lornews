@@ -465,7 +465,7 @@ sub parse_body
         foreach my $word (split /\p{IsSpace}+/, $text) {
             if ($line > 0) {
                 if ($line + ($listlev ? 4 * $listlev + 2 : 0)
-                          + ($quotlev ? $quotlev + 1     : 0)
+                          + ($quotlev ?     $quotlev + 1 : 0)
                           + length($word) >= 72) {
                     &$newline;
                 }

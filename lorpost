@@ -195,10 +195,14 @@ sub read_cookies
         ]);
         fatal $resp->status_line if $resp->is_error;
         fatal $1 if $resp->content =~ /<title>(.*?)<\/title>/;
-
-        eval { $cookies->save() };
-        fatal "Cannot save cookies: $!" if $@;
     }
+    else {
+        my $resp = $agent->get($lorserver);
+        fatal $resp->status_line if $resp->is_error;
+    }
+
+    eval { $cookies->save() };
+    fatal "Cannot save cookies: $!" if $@;
 }
 
 sub read_sessionid

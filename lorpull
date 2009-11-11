@@ -310,7 +310,7 @@ sub pull
                 $arts > $old or next;
             }
 
-            foreach (0 .. $pages-1) {
+            foreach (reverse (0 .. $pages-1)) {
                 my $pk = pull_thread_page($thread, $_, $group, $dir)
                     or last;
                 $k += $pk;

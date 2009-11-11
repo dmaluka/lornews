@@ -592,8 +592,6 @@ L:  while (1) {
                     &$newline;
                 }
                 case "li" {
-                    $listlev > 0 or lorchanged;
-
                     $body .= "\n".("    " x $listlev);
                     $body .= $listlev % 2 ? "* " : "- ";
                     $line = 0;

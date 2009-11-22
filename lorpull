@@ -339,8 +339,8 @@ sub pull_thread_page
 
         $p->get_tag("/h1") or lorchanged;
 
-        my ($body, $lines, $tags, $linkurl, $linktext, $imgurl, $imginfo,
-            $voteurl) = parse_body($p, 1);
+        my ($body, $lines, $tags, $linkurl, $linktext, $imgurl, $voteurl)
+            = parse_body($p, 1);
         my ($user, $banned, $stars, $udate, $moder, $mdate)
             = parse_footer($p, 1);
 
@@ -357,7 +357,6 @@ sub pull_thread_page
                 'X-Link-URL'        => $linkurl,
                 'X-Link-Text'       => $linktext,
                 'X-Image-URL'       => $imgurl,
-                'X-Image-Info'      => $imginfo,
                 'X-Vote-URL'        => $voteurl,
                 'X-Moderator'       => $moder,
                 'X-Moderation-Date' => defined $moder ? email_date($mdate)
@@ -446,7 +445,7 @@ sub parse_body
     my $lines = 0;
 
     my ($tags, $linkurl, $linktext);
-    my ($imgurl, $imginfo, $voteurl);
+    my ($imgurl, $voteurl);
 
     my $newline = sub {
         $body ne "" or return;
@@ -571,10 +570,6 @@ L:  while (1) {
                                   && $t->[1] eq "img"
                                   && $href =~ /^\/gallery\//) {
                         $imgurl = $lorserver.$href;
-
-                        $p->get_tag("i") or lorchanged;
-                        $imginfo = $p->get_text;
-
                         $p->get_tag("/p") or lorchanged;
                     }
                     else {
@@ -671,8 +666,7 @@ L:  while (1) {
         $lines++ if $body !~ /\n$/;
     }
 
-    return $body, $lines, $tags, $linkurl, $linktext,
-           $imgurl, $imginfo, $voteurl;
+    return $body, $lines, $tags, $linkurl, $linktext, $imgurl, $voteurl;
 }
 
 sub parse_footer

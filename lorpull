@@ -252,9 +252,12 @@ sub pull
                          "offset=$offset");
         $p->get_tag("tbody") or lorchanged;
 
+        my $empty = 1;
         while (1) {
             my $t = $p->get_tag("tr", "/tbody") or lorchanged;
             last if $t->[0] eq "/tbody";
+
+            $empty = 0;
 
             my $thread;
             my $pages = 0;
@@ -320,6 +323,8 @@ sub pull
                     unless $quiet;
             }
         }
+
+        last if $empty;
     }
 }
 

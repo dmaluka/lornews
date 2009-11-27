@@ -614,6 +614,23 @@ L:  while (1) {
                         $quotlev++;
                         &$newline;
                     }
+                    elsif ($t->[2]{class} eq "code") {
+                        $p->get_tag("pre") or lorchanged;
+
+                        $t = $p->get_text;
+                        decode_entities($t);
+
+                        foreach (split /\n/, $t) {
+                            &$newline;
+                            $body .= $_;
+                        }
+
+                        &$newline;
+                        &$newline;
+
+                        $p->get_tag("/pre") or lorchanged;
+                        $p->get_tag("/div") or lorchanged;
+                    }
                     elsif ($t->[2]{class} eq "sign") { last L; }
                     else {
                         lorchanged;

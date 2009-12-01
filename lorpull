@@ -621,10 +621,12 @@ L:  while (1) {
                         decode_entities($t);
 
                         foreach (split /\n/, $t) {
+                            $nl = 0;
                             &$newline;
                             $body .= $_;
                         }
 
+                        $nl = 0;
                         &$newline;
                         &$newline;
 

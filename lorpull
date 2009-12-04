@@ -618,6 +618,7 @@ L:  while (1) {
                         $p->get_tag("pre") or lorchanged;
 
                         $t = $p->get_text;
+                        $t = $t->[0] eq "T" ? $t->[1] : $p->get_text;
                         decode_entities($t);
 
                         foreach (split /\n/, $t) {

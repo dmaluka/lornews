@@ -336,14 +336,14 @@ sub pull_thread_page
     my $k = 0;
     my $time = time;
       
+    $p->get_tag("h1") or lorchanged;
+
+    my $tsubj = $p->get_text;
+    $tsubj =~ s/^\s+|\s+$//gs;
+
+    $p->get_tag("/h1") or lorchanged;
+
     unless (-f "$dir/$thread/0") {
-        $p->get_tag("h1") or lorchanged;
-
-        my $subj = $p->get_text;
-        $subj =~ s/^\s+|\s+$//gs;
-
-        $p->get_tag("/h1") or lorchanged;
-
         my ($body, $lines, $tags, $linkurl, $linktext, $imgurl, $voteurl)
             = parse_body($p, 1);
         my ($user, $banned, $stars, $udate, $moder, $mdate)
@@ -352,7 +352,7 @@ sub pull_thread_page
         if (!$days || ($time - $udate) / $daysec <= $days) {
             save_article($dir, $thread, 0, $body, $lines,
                 'Newsgroups'        => $group,
-                'Subject'           => $subj,
+                'Subject'           => $tsubj,
                 'From'              => "$user <$user\@astral.lor>".
                     ($banned ? " (banned)" : ""),
                 'Date'              => email_date($udate),
@@ -391,13 +391,27 @@ sub pull_thread_page
             $inreplyto = $1;
         }
 
-        $p->get_tag("h2") or lorchanged;
+        $t = $p->get_tag("div") or lorchanged;
+        $p->get_tag("div") or lorchanged
+            if exists $t->[1]{class} &&
+                      $t->[1]{class} eq "userpic";
+        $p->get_text;
 
-        my $subj = $p->get_text;
-        $subj =~ s/^\s+|\s+$//gs;
-        $subj =~ s/[\s\t]+/ /gs;
+        # The code became a terrible mess, I must refactor it!!!
 
-        $p->get_tag("/h2") or lorchanged;
+        my $subj = "Re: $tsubj";
+
+        $t = $p->get_token;
+        if ($t->[0] eq "S" && $t->[1] eq "h2") {
+            $subj = $p->get_text;
+            $subj =~ s/^\s+|\s+$//gs;
+            $subj =~ s/[\s\t]+/ /gs;
+
+            $p->get_tag("/h2") or lorchanged;
+        }
+        else {
+            $p->unget_token($t);
+        }
 
         my ($body, $lines) = parse_body($p, 0);
         my ($user, $banned, $stars, $date) = parse_footer($p, 0);
@@ -617,7 +631,7 @@ L:  while (1) {
                     elsif ($t->[2]{class} eq "code") {
                         $p->get_tag("pre") or lorchanged;
 
-                        $t = $p->get_text;
+                        $t = $p->get_token;
                         $t = $t->[0] eq "T" ? $t->[1] : $p->get_text;
                         decode_entities($t);
 

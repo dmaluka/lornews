@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/sh -e
 
 BINDIR=${1:-"/usr/local/bin"}
 
